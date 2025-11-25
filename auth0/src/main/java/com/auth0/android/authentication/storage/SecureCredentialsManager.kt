@@ -11,7 +11,6 @@ import com.auth0.android.authentication.AuthenticationAPIClient
 import com.auth0.android.authentication.AuthenticationException
 import com.auth0.android.callback.Callback
 import com.auth0.android.request.internal.GsonProvider
-import com.auth0.android.request.internal.Jwt
 import com.auth0.android.result.APICredentials
 import com.auth0.android.result.Credentials
 import com.auth0.android.result.OptionalCredentials
@@ -19,15 +18,12 @@ import com.auth0.android.result.SSOCredentials
 import com.auth0.android.result.UserProfile
 import com.auth0.android.result.toAPICredentials
 import com.google.gson.Gson
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.lang.ref.WeakReference
-import java.util.*
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executor
-import kotlin.collections.component1
-import kotlin.collections.component2
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -47,6 +43,9 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
 ) : BaseCredentialsManager(apiClient, storage, jwtDecoder) {
     private val gson: Gson = GsonProvider.gson
 
+    // Biometric session management
+    private val lastBiometricAuthTime = AtomicLong(NO_SESSION)
+
     /**
      * Creates a new SecureCredentialsManager to handle Credentials
      *
@@ -60,6 +59,34 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         storage: Storage,
     ) : this(
         AuthenticationAPIClient(auth0),
+        context,
+        auth0,
+        storage
+    )
+
+    /**
+     * Creates a new SecureCredentialsManager to handle Credentials with a custom AuthenticationAPIClient instance.
+     * Use this constructor when you need to configure the API client with advanced features like DPoP.
+     *
+     * Example usage:
+     * ```
+     * val auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN")
+     * val apiClient = AuthenticationAPIClient(auth0).useDPoP(context)
+     * val manager = SecureCredentialsManager(apiClient, context, auth0, storage)
+     * ```
+     *
+     * @param apiClient a configured AuthenticationAPIClient instance
+     * @param context   a valid context
+     * @param auth0     the Auth0 account information to use
+     * @param storage   the storage implementation to use
+     */
+    public constructor(
+        apiClient: AuthenticationAPIClient,
+        context: Context,
+        auth0: Auth0,
+        storage: Storage
+    ) : this(
+        apiClient,
         storage,
         CryptoUtil(context, storage, KEY_ALIAS),
         JWTDecoder(),
@@ -84,6 +111,50 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         localAuthenticationOptions: LocalAuthenticationOptions
     ) : this(
         AuthenticationAPIClient(auth0),
+        context,
+        auth0,
+        storage,
+        fragmentActivity,
+        localAuthenticationOptions
+    )
+
+
+    /**
+     * Creates a new SecureCredentialsManager to handle Credentials with biometrics Authentication
+     * and a custom AuthenticationAPIClient instance.
+     * Use this constructor when you need to configure the API client with advanced features like DPoP
+     * along with biometric authentication.
+     *
+     * Example usage:
+     * ```
+     * val auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN")
+     * val apiClient = AuthenticationAPIClient(auth0).useDPoP(context)
+     * val manager = SecureCredentialsManager(
+     *     apiClient,
+     *     context,
+     *     auth0,
+     *     storage,
+     *     fragmentActivity,
+     *     localAuthenticationOptions
+     * )
+     * ```
+     *
+     * @param apiClient a configured AuthenticationAPIClient instance
+     * @param context   a valid context
+     * @param auth0     the Auth0 account information to use
+     * @param storage   the storage implementation to use
+     * @param fragmentActivity the FragmentActivity to use for the biometric authentication
+     * @param localAuthenticationOptions the options of type [LocalAuthenticationOptions] to use for the biometric authentication
+     */
+    public constructor(
+        apiClient: AuthenticationAPIClient,
+        context: Context,
+        auth0: Auth0,
+        storage: Storage,
+        fragmentActivity: FragmentActivity,
+        localAuthenticationOptions: LocalAuthenticationOptions
+    ) : this(
+        apiClient,
         storage,
         CryptoUtil(context, storage, KEY_ALIAS),
         JWTDecoder(),
@@ -92,6 +163,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         localAuthenticationOptions,
         DefaultLocalAuthenticationManagerFactory()
     )
+
 
     /**
      * Saves the given credentials in the Storage.
@@ -264,7 +336,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
             if (credentials == null) {
                 return null
             }
-           return credentials.user
+            return credentials.user
         }
 
     /**
@@ -609,6 +681,12 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         }
 
         if (fragmentActivity != null && localAuthenticationOptions != null && localAuthenticationManagerFactory != null) {
+            // Check if biometric session is valid based on policy
+            if (isBiometricSessionValid()) {
+                // Session is valid, bypass biometric prompt
+                continueGetCredentials(scope, minTtl, parameters, headers, forceRefresh, callback)
+                return
+            }
 
             fragmentActivity.get()?.let { fragmentActivity ->
                 startBiometricAuthentication(
@@ -626,20 +704,6 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         continueGetCredentials(scope, minTtl, parameters, headers, forceRefresh, callback)
     }
 
-    private val localAuthenticationResultCallback =
-        { scope: String?, minTtl: Int, parameters: Map<String, String>, headers: Map<String, String>, forceRefresh: Boolean, callback: Callback<Credentials, CredentialsManagerException> ->
-            object : Callback<Boolean, CredentialsManagerException> {
-                override fun onSuccess(result: Boolean) {
-                    continueGetCredentials(
-                        scope, minTtl, parameters, headers, forceRefresh, callback
-                    )
-                }
-
-                override fun onFailure(error: CredentialsManagerException) {
-                    callback.onFailure(error)
-                }
-            }
-        }
 
     /**
      * Retrieves API credentials from storage and automatically renews them using the refresh token if the access
@@ -664,6 +728,11 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
     ) {
 
         if (fragmentActivity != null && localAuthenticationOptions != null && localAuthenticationManagerFactory != null) {
+
+            if (isBiometricSessionValid()) {
+                continueGetApiCredentials(audience, scope, minTtl, parameters, headers, callback)
+                return
+            }
 
             fragmentActivity.get()?.let { fragmentActivity ->
                 startBiometricAuthentication(
@@ -690,6 +759,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         storage.remove(KEY_EXPIRES_AT)
         storage.remove(LEGACY_KEY_CACHE_EXPIRES_AT)
         storage.remove(KEY_CAN_REFRESH)
+        clearBiometricSession()
         Log.d(TAG, "Credentials were just removed from the storage")
     }
 
@@ -897,6 +967,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         serialExecutor.execute {
             val encryptedEncodedJson = storage.retrieveString(audience)
             //Check if existing api credentials are present and valid
+
             encryptedEncodedJson?.let { encryptedEncoded ->
                 val encrypted = Base64.decode(encryptedEncoded, Base64.DEFAULT)
                 val json: String = try {
@@ -1024,6 +1095,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
                 CredentialsManagerException.Code.INCOMPATIBLE_DEVICE, e
             )
         } catch (e: CryptoException) {
+            clearCredentials()
             throw CredentialsManagerException(
                 CredentialsManagerException.Code.CRYPTO_EXCEPTION, e
             )
@@ -1063,6 +1135,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
           forceRefresh: Boolean, callback: Callback<Credentials, CredentialsManagerException> ->
             object : Callback<Boolean, CredentialsManagerException> {
                 override fun onSuccess(result: Boolean) {
+                    updateBiometricSession()
                     continueGetCredentials(
                         scope, minTtl, parameters, headers, forceRefresh,
                         callback
@@ -1083,6 +1156,7 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
           callback: Callback<APICredentials, CredentialsManagerException> ->
             object : Callback<Boolean, CredentialsManagerException> {
                 override fun onSuccess(result: Boolean) {
+                    updateBiometricSession()
                     continueGetApiCredentials(
                         audience, scope, minTtl, parameters, headers,
                         callback
@@ -1116,6 +1190,44 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
         saveCredentials(newCredentials)
     }
 
+    /**
+     * Checks if the current biometric session is valid based on the configured policy.
+     */
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun isBiometricSessionValid(): Boolean {
+        val lastAuth = lastBiometricAuthTime.get()
+        if (lastAuth == NO_SESSION) return false // No session exists
+
+        val policy = localAuthenticationOptions?.policy ?: BiometricPolicy.Always
+        return when (policy) {
+            is BiometricPolicy.Session,
+            is BiometricPolicy.AppLifecycle -> {
+                val timeoutMillis = when (policy) {
+                    is BiometricPolicy.Session -> policy.timeoutInSeconds
+                    is BiometricPolicy.AppLifecycle -> policy.timeoutInSeconds
+                    else -> return false
+                } * 1000L
+                System.currentTimeMillis() - lastAuth < timeoutMillis
+            }
+
+            is BiometricPolicy.Always -> false
+        }
+    }
+
+    /**
+     * Updates the biometric session timestamp to the current time.
+     */
+    private fun updateBiometricSession() {
+        lastBiometricAuthTime.set(System.currentTimeMillis())
+    }
+
+    /**
+     * Clears the in-memory biometric session timestamp. Can be called from any thread.
+     */
+    public fun clearBiometricSession() {
+        lastBiometricAuthTime.set(NO_SESSION)
+    }
+
     internal companion object {
         private val TAG = SecureCredentialsManager::class.java.simpleName
 
@@ -1135,5 +1247,8 @@ public class SecureCredentialsManager @VisibleForTesting(otherwise = VisibleForT
 
         @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
         internal const val KEY_ALIAS = "com.auth0.key"
+
+        // Using NO_SESSION to represent "no session" (uninitialized state)
+        private const val NO_SESSION = -1L
     }
 }

@@ -738,10 +738,10 @@ authentication
 > [!NOTE]  
 > This feature is currently available in [Early Access](https://auth0.com/docs/troubleshoot/product-lifecycle/product-release-stages#early-access). Please reach out to Auth0 support to get it enabled for your tenant.
 
-[DPoP](https://www.rfc-editor.org/rfc/rfc9449.html) (Demonstrating Proof of Posession) is an application-level mechanism for sender-constraining OAuth 2.0 access and refresh tokens by proving that the app is in possession of a certain private key. You can enable it by calling the `useDPoP()` method. This ensures that DPoP proofs are generated for requests made through the AuthenticationAPI client.
+[DPoP](https://www.rfc-editor.org/rfc/rfc9449.html) (Demonstrating Proof of Possession) is an application-level mechanism for sender-constraining OAuth 2.0 access and refresh tokens by proving that the app is in possession of a certain private key. You can enable it by calling the `useDPoP(context: Context)` method. This ensures that DPoP proofs are generated for requests made through the AuthenticationAPI client.
 
 ```kotlin
-val client = AuthenticationAPIClient(account).useDPoP()
+val client = AuthenticationAPIClient(account).useDPoP(context)
 ```
 
 [!IMPORTANT]
@@ -784,6 +784,17 @@ On logout, you should call `DPoP.clearKeyPair()` to delete the user's key pair f
 DPoP.clearKeyPair()
 
 ```
+
+To use DPoP with `SecureCredentialsManager` you need to pass an instance of the `AuthenticationAPIClient` with DPoP enabled to the `SecureCredentialsManager` constructor.
+
+```kotlin
+val auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN")
+val apiClient = AuthenticationAPIClient(auth0).useDPoP(this)
+val storage = SharedPreferencesStorage(this)
+val manager = SecureCredentialsManager(apiClient, this, auth0, storage)
+
+```
+
 
 > [!NOTE]  
 > DPoP is supported only on Android version 6.0 (API level 23) and above. Trying to use DPoP in any older versions will result in an exception.
@@ -1382,6 +1393,28 @@ SecureCredentialsManager manager = new SecureCredentialsManager(this, account, s
 ```
 </details>
 
+#### Using a Custom AuthenticationAPIClient
+
+If you need to configure the `AuthenticationAPIClient` with advanced features (such as DPoP), you can pass your own configured instance to `SecureCredentialsManager`:
+
+```kotlin
+val auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN")
+val apiClient = AuthenticationAPIClient(auth0).useDPoP(this)
+val storage = SharedPreferencesStorage(this)
+val manager = SecureCredentialsManager(apiClient, this, auth0, storage)
+```
+
+<details>
+  <summary>Using Java</summary>
+
+```java
+Auth0 auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN");
+AuthenticationAPIClient apiClient = new AuthenticationAPIClient(auth0).useDPoP(this);
+Storage storage = new SharedPreferencesStorage(this);
+SecureCredentialsManager manager = new SecureCredentialsManager(apiClient, this, auth0, storage);
+```
+</details>
+
 #### Requiring Authentication
 
 You can require the user authentication to obtain credentials. This will make the manager prompt the user with the device's configured Lock Screen, which they must pass correctly in order to obtain the credentials. **This feature is only available on devices where the user has setup a secured Lock Screen** (PIN, Pattern, Password or Fingerprint).
@@ -1393,6 +1426,7 @@ val localAuthenticationOptions =
     LocalAuthenticationOptions.Builder().setTitle("Authenticate").setDescription("Accessing Credentials")
         .setAuthenticationLevel(AuthenticationLevel.STRONG).setNegativeButtonText("Cancel")
         .setDeviceCredentialFallback(true)
+        .setPolicy(BiometricPolicy.Session(300)) // Optional: Use session-based policy (5 minutes)
         .build()
 val storage = SharedPreferencesStorage(this)
 val manager = SecureCredentialsManager(
@@ -1409,10 +1443,54 @@ LocalAuthenticationOptions localAuthenticationOptions =
         new LocalAuthenticationOptions.Builder().setTitle("Authenticate").setDescription("Accessing Credentials")
                 .setAuthenticationLevel(AuthenticationLevel.STRONG).setNegativeButtonText("Cancel")
                 .setDeviceCredentialFallback(true)
+                .setPolicy(new BiometricPolicy.Session(300)) // Optional: Use session-based policy (5 minutes)
                 .build();
 Storage storage = new SharedPreferencesStorage(context);
 SecureCredentialsManager secureCredentialsManager = new SecureCredentialsManager(
         context, auth0, storage, fragmentActivity,
+        localAuthenticationOptions);
+```
+</details>
+
+You can also combine biometric authentication with a custom `AuthenticationAPIClient`:
+
+```kotlin
+val auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN")
+val apiClient = AuthenticationAPIClient(auth0).useDPoP(this)
+val localAuthenticationOptions =
+    LocalAuthenticationOptions.Builder()
+        .setTitle("Authenticate")
+        .setDescription("Accessing Credentials")
+        .setAuthenticationLevel(AuthenticationLevel.STRONG)
+        .setNegativeButtonText("Cancel")
+        .setDeviceCredentialFallback(true)
+        .setPolicy(BiometricPolicy.Session(300))
+        .build()
+val storage = SharedPreferencesStorage(this)
+val manager = SecureCredentialsManager(
+    apiClient, this, auth0, storage, fragmentActivity,
+    localAuthenticationOptions
+)
+```
+
+<details>
+  <summary>Using Java</summary>
+
+```java
+Auth0 auth0 = Auth0.getInstance("YOUR_CLIENT_ID", "YOUR_DOMAIN");
+AuthenticationAPIClient apiClient = new AuthenticationAPIClient(auth0).useDPoP(this);
+LocalAuthenticationOptions localAuthenticationOptions =
+        new LocalAuthenticationOptions.Builder()
+                .setTitle("Authenticate")
+                .setDescription("Accessing Credentials")
+                .setAuthenticationLevel(AuthenticationLevel.STRONG)
+                .setNegativeButtonText("Cancel")
+                .setDeviceCredentialFallback(true)
+                .setPolicy(new BiometricPolicy.Session(300))
+                .build();
+Storage storage = new SharedPreferencesStorage(this);
+SecureCredentialsManager secureCredentialsManager = new SecureCredentialsManager(
+        apiClient, this, auth0, storage, fragmentActivity,
         localAuthenticationOptions);
 ```
 </details>
@@ -1433,6 +1511,7 @@ On Android API 28 and 29, specifying **STRONG** as the authentication level alon
 - **setAuthenticationLevel(authenticationLevel: AuthenticationLevel): Builder** - Sets the authentication level, more on this can be found [here](#authenticationlevel-enum-values)
 - **setDeviceCredentialFallback(enableDeviceCredentialFallback: Boolean): Builder** - Enables/disables device credential fallback.
 - **setNegativeButtonText(negativeButtonText: String): Builder** - Sets the negative button text, used only when the device credential fallback is disabled (or) the authentication level is not set to `AuthenticationLevel.DEVICE_CREDENTIAL`.
+- **setPolicy(policy: BiometricPolicy): Builder** - Sets the biometric policy that controls when biometric authentication is required. See [BiometricPolicy Types](#biometricpolicy-types) for more details.
 - **build(): LocalAuthenticationOptions** - Constructs the LocalAuthenticationOptions instance.
 
 
@@ -1444,6 +1523,80 @@ AuthenticationLevel is an enum that defines the different levels of authenticati
 - **STRONG**: Any biometric (e.g., fingerprint, iris, or face) on the device that meets or exceeds the requirements for Class 3 (formerly Strong).
 - **WEAK**: Any biometric (e.g., fingerprint, iris, or face) on the device that meets or exceeds the requirements for Class 2 (formerly Weak), as defined by the Android CDD.
 - **DEVICE_CREDENTIAL**: The non-biometric credential used to secure the device (i.e., PIN, pattern, or password).
+
+
+#### BiometricPolicy Types
+
+BiometricPolicy controls when biometric authentication is required when accessing stored credentials. There are three types of policies available:
+
+**Policy Types**:
+- **BiometricPolicy.Always**: Requires biometric authentication every time credentials are accessed. This is the default policy and provides the highest security level.
+- **BiometricPolicy.Session(timeoutInSeconds)**: Requires biometric authentication only if the specified time (in seconds) has passed since the last successful authentication. Once authenticated, subsequent access within the timeout period will not require re-authentication.
+- **BiometricPolicy.AppLifecycle(timeoutInSeconds = 3600)**: Similar to Session policy, but the session persists for the lifetime of the app process. The default timeout is 1 hour (3600 seconds).
+
+**Examples**:
+
+```kotlin
+// Always require biometric authentication (default)
+val alwaysPolicy = LocalAuthenticationOptions.Builder()
+    .setTitle("Authenticate")
+    .setAuthenticationLevel(AuthenticationLevel.STRONG)
+    .setPolicy(BiometricPolicy.Always)
+    .build()
+
+// Require authentication only once per 5-minute session
+val sessionPolicy = LocalAuthenticationOptions.Builder()
+    .setTitle("Authenticate")
+    .setAuthenticationLevel(AuthenticationLevel.STRONG)
+    .setPolicy(BiometricPolicy.Session(300)) // 5 minutes
+    .build()
+
+// Require authentication once per app lifecycle (1 hour default)
+val appLifecyclePolicy = LocalAuthenticationOptions.Builder()
+    .setTitle("Authenticate")
+    .setAuthenticationLevel(AuthenticationLevel.STRONG)
+    .setPolicy(BiometricPolicy.AppLifecycle()) // Default: 3600 seconds (1 hour)
+    .build()
+```
+
+<details>
+  <summary>Using Java</summary>
+
+```java
+// Always require biometric authentication (default)
+LocalAuthenticationOptions alwaysPolicy = new LocalAuthenticationOptions.Builder()
+    .setTitle("Authenticate")
+    .setAuthenticationLevel(AuthenticationLevel.STRONG)
+    .setPolicy(BiometricPolicy.Always.INSTANCE)
+    .build();
+
+// Require authentication only once per 5-minute session  
+LocalAuthenticationOptions sessionPolicy = new LocalAuthenticationOptions.Builder()
+    .setTitle("Authenticate")
+    .setAuthenticationLevel(AuthenticationLevel.STRONG)
+    .setPolicy(new BiometricPolicy.Session(300)) // 5 minutes
+    .build();
+
+// Require authentication once per app lifecycle (default 1 hour)
+LocalAuthenticationOptions appLifecyclePolicy = new LocalAuthenticationOptions.Builder()
+    .setTitle("Authenticate")
+    .setAuthenticationLevel(AuthenticationLevel.STRONG)
+    .setPolicy(new BiometricPolicy.AppLifecycle()) // Default: 3600 seconds
+    .build();
+```
+</details>
+
+**Managing Biometric Sessions**:
+
+You can manually clear the biometric session to force re-authentication on the next credential access:
+
+```kotlin
+// Clear the biometric session
+secureCredentialsManager.clearBiometricSession()
+
+// Check if the current session is valid
+val isValid = secureCredentialsManager.isBiometricSessionValid()
+```
 
 
 ### Other Credentials
